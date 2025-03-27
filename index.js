@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const { Strategy:JwtStrategy, ExtractJwt } = require('passport-jwt');
 const cors = require('cors');
 const app = express();
@@ -70,7 +70,7 @@ app.post('/login', async (req, res) => {
 
 app.post("/refresh-token", async (req, res) => {
     try {
-        const refreshToken = req.cookies.refreshToken; // Get token from cookies
+        const {refreshToken} = req.body; // Get token from request body
 
         if (!refreshToken) {
             return res.status(401).json({ message: "Refresh token is required" });
@@ -118,8 +118,14 @@ app.post("/refresh-token", async (req, res) => {
         console.error("refresh-token error: ", error);
         res.status(401).json({ message: "Invalid token" });              
     }
-}
-);
+});
+
+// Protected Route
+app.get('/protected', passport.authenticate('jwt', { session: false }), (req, res) => {
+    res.json({ message: 'You have accessed a protected route', user: req.user });
+  })
+
+
 // Start the server
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
