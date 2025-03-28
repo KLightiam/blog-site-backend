@@ -4,6 +4,7 @@ const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { Strategy:JwtStrategy, ExtractJwt } = require('passport-jwt');
+const {body, validationResult, ExpressValidator} = require("express-validator");
 const cors = require('cors');
 const app = express();
 
@@ -39,10 +40,81 @@ function generateTokens(user) {
     return { accessToken, refreshToken };
 }
 
+//user validation
+const validateUser = [
+    body('username').trim()
+    .isLength({ min: 3, max: 20 }).withMessage('Username must be 3-20 characters long')
+    .isAlphanumeric().withMessage('Username must contain only letters and numbers')
+    .not().isEmpty().withMessage('Username is required'),
+
+    body('email')
+    .isEmail().withMessage('Invalid email format')
+    .normalizeEmail()
+    .custom(async (value) => {
+        const user = await prisma.user.findUnique({
+            where: {
+                email: value
+            }
+        });
+        if (user) {
+            throw new Error('Email already exists');
+        }
+    }),
+
+    body('password')
+    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+    .matches(/[A-Z]/).withMessage('Password must contain at least one uppercase letter')
+    .matches(/[a-z]/).withMessage('Password must contain at least one lowercase letter')
+    .matches(/[0-9]/).withMessage('Password must contain at least one number')
+    .matches(/[!@#$%^&*]/).withMessage('Password must contain at least one special character')
+    .not().isEmpty().withMessage('Password is required'),
+
+    body('confirmPassword')
+    .custom((value, { req }) => {
+        if (value !== req.body.password) {
+          throw new Error('Passwords do not match');
+        }
+        return true;
+      })
+ ];
+
 // Routes
 app.get('/', (req, res) => {
     res.json(['Hello World!']);
 });
+
+app.post('/register', async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        const { username, email, password } = req.body;
+        // Check if user already exists
+        const existingUser = await prisma.user.findUnique({
+            where: {
+                username
+            }
+        });
+        if (existingUser) {
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        // Hash password
+        const hashedPassword = bcrypt.hashSync(password, 10);
+        const user = await prisma.user.create({
+            data: {
+                username,
+                email,
+                password: hashedPassword
+            }
+        });
+        res.status(201).json(user);
+    } catch (error) {
+        console.error("register error: ", error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+);
 
 app.post('/login', async (req, res) => {
     try{
