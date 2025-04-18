@@ -28,7 +28,7 @@ passport.use(new JwtStrategy(jwtOptions, (payload, done) => {
             id: payload.sub
         }
     });
-    if (user) {
+    if (user.role === 'ADMIN') {
         return done(null, user);
     } else {
         return done(null, false);
@@ -37,8 +37,8 @@ passport.use(new JwtStrategy(jwtOptions, (payload, done) => {
 
 // Generate Tokens
 function generateTokens(user) {
-    const accessToken = jwt.sign({ sub: user.id }, ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
-    const refreshToken = jwt.sign({ sub: user.id }, REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
+    const accessToken = jwt.sign({ sub: user.id }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
+    const refreshToken = jwt.sign({ sub: user.id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
     return { accessToken, refreshToken };
 }
 
@@ -152,23 +152,23 @@ app.post("/refresh-token", async (req, res) => {
         }
 
         // Check if refresh token exists in database
-        const storedToken = await prisma.refreshToken.findUnique({
-            where: { token: refreshToken }
-        });
+        // const storedToken = await prisma.refreshToken.findUnique({
+        //     where: { token: refreshToken }
+        // });
 
-        if (!storedToken) {
-            return res.status(403).json({ message: "Invalid refresh token" });
-        }
+        // if (!storedToken) {
+        //     return res.status(403).json({ message: "Invalid refresh token" });
+        // }
 
         // Verify token
-        jwt.verify(refreshToken, REFRESH_SECRET, async (err, payload) => {
+        jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, async (err, payload) => {
             if (err) {
                 return res.status(403).json({ message: "Invalid token" });
             }
 
             // Find user
             const user = await prisma.user.findUnique({
-                where: { id: storedToken.userId }
+                where: { id: payload.sub }
             });
 
             if (!user) {
@@ -192,6 +192,24 @@ app.post("/refresh-token", async (req, res) => {
     } catch (error) {
         console.error("refresh-token error: ", error);
         res.status(401).json({ message: "Invalid token" });
+    }
+});
+
+app.post('/logout', async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+        if (!refreshToken) {
+            return res.status(401).json({ message: 'Refresh token is required' });
+        }
+        await prisma.refreshToken.delete({
+            where: {
+                token: refreshToken
+            }
+        });
+        res.json({ message: 'Logged out successfully' });
+    } catch (error) {
+        console.error("logout error: ", error);
+        res.status(500).json({ message: 'Internal server error' });
     }
 });
 
