@@ -16,6 +16,9 @@ app.use(express.json());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 
+
+//Admin section
+
 // Passport
 const jwtOptions = {
     jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -82,7 +85,7 @@ const validateUser = [
 
 // Routes
 app.get('/', (req, res) => {
-    res.json(['Hello World!']);
+    res.json([`Welcome to Kabah's Blog!`]);
 });
 
 app.post('/register', async (req, res) => {
@@ -214,10 +217,45 @@ app.post('/logout', async (req, res) => {
 });
 
 // Protected Route
-app.get('/protected', passport.authenticate('jwt', { session: false }), (req, res) => {
+app.get('/admin', passport.authenticate('jwt', { session: false }), (req, res) => {
     res.json({ message: 'You have accessed a protected route', user: req.user });
 })
 
+
+
+
+//Client section
+
+app.get('/api/v1/trendingposts',async(req, res) => {
+    try {
+        const {page = 1, limit = 5 } = req.query;
+
+        const skip = (page - 1) * limit;
+
+        // Fetch posts with filters and pagination
+        const posts = await prisma.post.findMany({
+            orderBy: {
+                date: 'desc'
+            },
+            where: {
+                published: true,
+            },
+            skip: parseInt(skip),
+            take: parseInt(limit),
+            include: {
+                categories: true,
+                tags: true,
+                files: true,
+            },
+        });
+
+        res.json(posts);
+    } catch (error) {
+        console.error('Error fetching posts:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+);
 
 // Start the server
 const port = process.env.PORT || 3000;
