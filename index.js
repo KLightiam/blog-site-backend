@@ -257,6 +257,34 @@ app.get('/api/v1/trendingposts',async(req, res) => {
 }
 );
 
+app.get('/api/v1/posts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Fetch post by ID
+        const post = await prisma.post.findUnique({
+            where: {
+                id,
+            },
+            include: {
+                categories: true,
+                tags: true,
+                files: true,
+            },
+        });
+
+        if (!post) {
+            return res.status(404).json({ message: 'Post not found' });
+        }
+
+        res.json(post);
+    } catch (error) {
+        console.error('Error fetching post:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+);
+
 // Start the server
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
