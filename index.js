@@ -261,7 +261,6 @@ app.get('/api/v1/posts/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        // Fetch post by ID
         const post = await prisma.post.findUnique({
             where: {
                 id,
@@ -280,6 +279,31 @@ app.get('/api/v1/posts/:id', async (req, res) => {
         res.json(post);
     } catch (error) {
         console.error('Error fetching post:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+);
+
+app.get('/api/v1/categories', async (req, res) => {
+    try {
+        const categories = await prisma.category.findMany({
+            orderBy: {
+                name: 'asc'
+            },
+            include: {
+                posts: {
+                    where: {
+                        published: true
+                    },
+                    select: {
+                        id: true,
+                    }
+                }
+            }
+        });
+        res.json(categories);
+    } catch (error) {
+        console.error('Error fetching categories:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 }
