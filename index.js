@@ -104,7 +104,7 @@ app.post('/register', async (req, res) => {
         if (existingUser) {
             return res.status(400).json({ message: 'Username already exists' });
         }
-        // Hash password
+
         const hashedPassword = bcrypt.hashSync(password, 10);
         const user = await prisma.user.create({
             data: {
@@ -304,6 +304,39 @@ app.get('/api/v1/categories', async (req, res) => {
         res.json(categories);
     } catch (error) {
         console.error('Error fetching categories:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+);
+
+app.get('/api/v1/:category/posts', async (req, res) => {
+    try {
+        // console.log(req.params);
+        const categoryName = req.params.category;
+
+        const posts = await prisma.post.findMany({
+            where: {
+                categories: {
+                    some: {
+                        name: categoryName
+                    }
+                },
+                published: true
+            },
+            include: {
+                categories: true,
+                tags: true,
+                files: true,
+            },
+        });
+
+        if (!posts || posts.length === 0) {
+            return res.status(404).json({ message: 'No posts found for this category' });
+        }
+
+        res.json(posts);
+    } catch (error) {
+        console.error('Error fetching posts by category:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 }
