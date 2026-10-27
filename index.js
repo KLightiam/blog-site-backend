@@ -4,7 +4,6 @@ const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
 const { Strategy: JwtStrategy, ExtractJwt } = require('passport-jwt');
 const { body, validationResult } = require('express-validator');
 const cors = require('cors');
@@ -17,7 +16,8 @@ for (const name of ['DATABASE_URL', 'ACCESS_TOKEN_SECRET', 'REFRESH_TOKEN_SECRET
     }
 }
 
-const prisma = new PrismaClient();
+const prisma = require('./lib/prisma');
+const adminRouter = require('./routes/admin');
 const app = express();
 
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -28,7 +28,8 @@ const toPublicUser = ({ id, username, email, role }) => ({ id, username, email, 
 
 // Middleware
 app.use(express.json());
-app.use(cors());
+// Set CORS_ORIGIN (comma-separated) to only accept requests from your own sites.
+app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()) : '*' }));
 app.use(express.urlencoded({ extended: true }));
 
 
@@ -240,10 +241,16 @@ app.post('/logout', async (req, res) => {
     }
 });
 
-// Protected Route
-app.get('/admin', passport.authenticate('jwt', { session: false }), (req, res) => {
+// Protected Route. The admin site calls this to check who is signed in.
+const requireAdmin = passport.authenticate('jwt', { session: false });
+
+app.get('/admin', requireAdmin, (req, res) => {
     res.json({ message: 'You have accessed a protected route', user: toPublicUser(req.user) });
 })
+
+// Admin API (posts, cover images, categories). Registered before /api/v1/:category/posts,
+// which would otherwise treat "admin" as a category name.
+app.use('/api/v1/admin', requireAdmin, adminRouter);
 
 
 

@@ -216,7 +216,7 @@ async function main() {
                 name: `${p.id}-cover.jpg`,
                 storedName: `${p.id}-cover.jpg`,
                 url: cover(p.id),
-                publicId: `${p.id}-cover`,
+                publicId: null, // sample images aren't on Cloudinary, so there's nothing to delete there
                 type: 'image/jpeg',
                 post: { connect: { id: p.id } },
             },
