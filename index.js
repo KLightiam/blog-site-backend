@@ -1,15 +1,30 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 const { Strategy: JwtStrategy, ExtractJwt } = require('passport-jwt');
-const { body, validationResult, ExpressValidator } = require("express-validator");
+const { body, validationResult } = require('express-validator');
 const cors = require('cors');
+
+// Fail fast with a clear message instead of an obscure error on the first request.
+for (const name of ['DATABASE_URL', 'ACCESS_TOKEN_SECRET', 'REFRESH_TOKEN_SECRET']) {
+    if (!process.env[name]) {
+        console.error(`Missing ${name}. Copy .env.example to .env and fill it in.`);
+        process.exit(1);
+    }
+}
+
+const prisma = new PrismaClient();
 const app = express();
 
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Fields that are safe to send back about a user (never the password hash).
+const publicUser = { id: true, username: true, email: true, role: true };
+const toPublicUser = ({ id, username, email, role }) => ({ id, username, email, role });
 
 // Middleware
 app.use(express.json());
@@ -25,24 +40,37 @@ const jwtOptions = {
     secretOrKey: process.env.ACCESS_TOKEN_SECRET
 };
 
-passport.use(new JwtStrategy(jwtOptions, (payload, done) => {
-    const user = prisma.user.findUnique({
-        where: {
-            id: payload.sub
+passport.use(new JwtStrategy(jwtOptions, async (payload, done) => {
+    try {
+        const user = await prisma.user.findUnique({
+            where: { id: payload.sub },
+            select: publicUser,
+        });
+        if (user && user.role === 'ADMIN') {
+            return done(null, user);
         }
-    });
-    if (user.role === 'ADMIN') {
-        return done(null, user);
-    } else {
         return done(null, false);
+    } catch (error) {
+        return done(error, false);
     }
 }));
 
-// Generate Tokens
+// Generate Tokens. Each token gets a unique jwtid: without it, two tokens issued to the same user
+// in the same second are identical, so a replaced refresh token would still look valid.
 function generateTokens(user) {
-    const accessToken = jwt.sign({ sub: user.id }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
-    const refreshToken = jwt.sign({ sub: user.id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
+    const accessToken = jwt.sign({ sub: user.id }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15m', jwtid: crypto.randomUUID() });
+    const refreshToken = jwt.sign({ sub: user.id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d', jwtid: crypto.randomUUID() });
     return { accessToken, refreshToken };
+}
+
+// The schema allows one refresh token per user, so a new login replaces the previous one.
+function saveRefreshToken(userId, token) {
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+    return prisma.refreshToken.upsert({
+        where: { userId },
+        update: { token, expiresAt },
+        create: { token, userId, expiresAt },
+    });
 }
 
 //user validation
@@ -53,8 +81,9 @@ const validateUser = [
         .not().isEmpty().withMessage('Username is required'),
 
     body('email')
+        .trim()
         .isEmail().withMessage('Invalid email format')
-        .normalizeEmail()
+        .toLowerCase()
         .custom(async (value) => {
             const user = await prisma.user.findUnique({
                 where: {
@@ -88,7 +117,7 @@ app.get('/', (req, res) => {
     res.json([`Welcome to Kabah's Blog!`]);
 });
 
-app.post('/register', async (req, res) => {
+app.post('/register', validateUser, async (req, res) => {
     try {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
@@ -105,13 +134,14 @@ app.post('/register', async (req, res) => {
             return res.status(400).json({ message: 'Username already exists' });
         }
 
-        const hashedPassword = bcrypt.hashSync(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.user.create({
             data: {
                 username,
                 email,
                 password: hashedPassword
-            }
+            },
+            select: publicUser,
         });
         res.status(201).json(user);
     } catch (error) {
@@ -121,28 +151,30 @@ app.post('/register', async (req, res) => {
 }
 );
 
-app.post('/login', async (req, res) => {
+// Emails are stored trimmed and lower-cased (see validateUser), so look them up the same way.
+const normaliseLoginEmail = body('email').if(body('email').isString()).trim().toLowerCase();
+
+app.post('/login', normaliseLoginEmail, async (req, res) => {
     try {
         const { email, password } = req.body;
+        if (typeof email !== 'string' || typeof password !== 'string') {
+            return res.status(400).json({ message: 'Email and password are required' });
+        }
         const user = await prisma.user.findUnique({
             where: {
                 email
             }
         });
-        if (user && bcrypt.compareSync(password, user.password)) {
-            const tokens = generateTokens(user);
-            await prisma.refreshToken.create({
-                data: {
-                    token: tokens.refreshToken,
-                    userId: user.id,
-                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-                }
-            });
-            res.json(tokens);
+        // Same answer for an unknown email and a wrong password, so accounts can't be probed.
+        if (!user || !(await bcrypt.compare(password, user.password))) {
+            return res.status(401).json({ message: 'Invalid credentials' });
         }
+        const tokens = generateTokens(user);
+        await saveRefreshToken(user.id, tokens.refreshToken);
+        res.json(tokens);
     } catch (error) {
         console.error("login error: ", error);
-        res.status(401).json({ message: 'Invalid credentials' });
+        res.status(500).json({ message: 'Internal server error' });
     }
 });
 
@@ -154,47 +186,38 @@ app.post("/refresh-token", async (req, res) => {
             return res.status(401).json({ message: "Refresh token is required" });
         }
 
-        // Check if refresh token exists in database
-        // const storedToken = await prisma.refreshToken.findUnique({
-        //     where: { token: refreshToken }
-        // });
+        // Verify the signature and expiry first
+        let payload;
+        try {
+            payload = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+        } catch {
+            return res.status(403).json({ message: "Invalid token" });
+        }
 
-        // if (!storedToken) {
-        //     return res.status(403).json({ message: "Invalid refresh token" });
-        // }
-
-        // Verify token
-        jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, async (err, payload) => {
-            if (err) {
-                return res.status(403).json({ message: "Invalid token" });
-            }
-
-            // Find user
-            const user = await prisma.user.findUnique({
-                where: { id: payload.sub }
-            });
-
-            if (!user) {
-                return res.status(403).json({ message: "User not found" });
-            }
-
-            // Generate new tokens
-            const newTokens = generateTokens(user);
-
-            // Delete old refresh token and store the new one
-            await prisma.refreshToken.delete({ where: { token: refreshToken } });
-            await prisma.refreshToken.create({
-                data: {
-                    token: newTokens.refreshToken,
-                    userId: user.id,
-                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days expiry
-                }
-            });
-            res.json(newTokens);
+        // Then make sure it is the token we issued last (not logged out or already rotated)
+        const storedToken = await prisma.refreshToken.findUnique({
+            where: { token: refreshToken }
         });
+        if (!storedToken || storedToken.userId !== payload.sub || storedToken.expiresAt < new Date()) {
+            return res.status(403).json({ message: "Invalid refresh token" });
+        }
+
+        // Find user
+        const user = await prisma.user.findUnique({
+            where: { id: payload.sub }
+        });
+
+        if (!user) {
+            return res.status(403).json({ message: "User not found" });
+        }
+
+        // Generate new tokens and replace the old refresh token
+        const newTokens = generateTokens(user);
+        await saveRefreshToken(user.id, newTokens.refreshToken);
+        res.json(newTokens);
     } catch (error) {
         console.error("refresh-token error: ", error);
-        res.status(401).json({ message: "Invalid token" });
+        res.status(500).json({ message: "Internal server error" });
     }
 });
 
@@ -204,7 +227,8 @@ app.post('/logout', async (req, res) => {
         if (!refreshToken) {
             return res.status(401).json({ message: 'Refresh token is required' });
         }
-        await prisma.refreshToken.delete({
+        // deleteMany doesn't throw when the token is already gone, so logging out twice is fine.
+        await prisma.refreshToken.deleteMany({
             where: {
                 token: refreshToken
             }
@@ -218,7 +242,7 @@ app.post('/logout', async (req, res) => {
 
 // Protected Route
 app.get('/admin', passport.authenticate('jwt', { session: false }), (req, res) => {
-    res.json({ message: 'You have accessed a protected route', user: req.user });
+    res.json({ message: 'You have accessed a protected route', user: toPublicUser(req.user) });
 })
 
 
@@ -226,13 +250,25 @@ app.get('/admin', passport.authenticate('jwt', { session: false }), (req, res) =
 
 //Client section
 
-app.get('/api/v1/trendingposts',async(req, res) => {
+const postInclude = {
+    categories: true,
+    tags: true,
+    files: true,
+};
+
+// Reads ?page and ?limit, falling back to safe defaults for missing or invalid values.
+function pagination(query, { defaultLimit = 5, maxLimit = 50 } = {}) {
+    const page = Number.parseInt(query.page, 10);
+    const limit = Number.parseInt(query.limit, 10);
+    const take = Number.isInteger(limit) && limit > 0 ? Math.min(limit, maxLimit) : defaultLimit;
+    const current = Number.isInteger(page) && page > 0 ? page : 1;
+    return { skip: (current - 1) * take, take };
+}
+
+app.get('/api/v1/trendingposts', async (req, res) => {
     try {
-        const {page = 1, limit = 5 } = req.query;
+        const { skip, take } = pagination(req.query);
 
-        const skip = (page - 1) * limit;
-
-        // Fetch posts with filters and pagination
         const posts = await prisma.post.findMany({
             orderBy: {
                 date: 'desc'
@@ -240,13 +276,9 @@ app.get('/api/v1/trendingposts',async(req, res) => {
             where: {
                 published: true,
             },
-            skip: parseInt(skip),
-            take: parseInt(limit),
-            include: {
-                categories: true,
-                tags: true,
-                files: true,
-            },
+            skip,
+            take,
+            include: postInclude,
         });
 
         res.json(posts);
@@ -261,15 +293,13 @@ app.get('/api/v1/posts/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const post = await prisma.post.findUnique({
+        // Drafts are not public: an unpublished post answers 404, the same as a missing one.
+        const post = await prisma.post.findFirst({
             where: {
                 id,
+                published: true,
             },
-            include: {
-                categories: true,
-                tags: true,
-                files: true,
-            },
+            include: postInclude,
         });
 
         if (!post) {
@@ -286,7 +316,13 @@ app.get('/api/v1/posts/:id', async (req, res) => {
 
 app.get('/api/v1/categories', async (req, res) => {
     try {
+        // Only categories with at least one published post, so every listed topic has stories.
         const categories = await prisma.category.findMany({
+            where: {
+                posts: {
+                    some: { published: true }
+                }
+            },
             orderBy: {
                 name: 'asc'
             },
@@ -311,7 +347,6 @@ app.get('/api/v1/categories', async (req, res) => {
 
 app.get('/api/v1/:category/posts', async (req, res) => {
     try {
-        // console.log(req.params);
         const categoryName = req.params.category;
 
         const posts = await prisma.post.findMany({
@@ -323,14 +358,13 @@ app.get('/api/v1/:category/posts', async (req, res) => {
                 },
                 published: true
             },
-            include: {
-                categories: true,
-                tags: true,
-                files: true,
+            orderBy: {
+                date: 'desc'
             },
+            include: postInclude,
         });
 
-        if (!posts || posts.length === 0) {
+        if (posts.length === 0) {
             return res.status(404).json({ message: 'No posts found for this category' });
         }
 
@@ -341,6 +375,21 @@ app.get('/api/v1/:category/posts', async (req, res) => {
     }
 }
 );
+
+// Unknown routes answer in JSON like the rest of the API.
+app.use((req, res) => {
+    res.status(404).json({ message: 'Not found' });
+});
+
+// Malformed JSON bodies and any other unhandled error.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+    if (err.type === 'entity.parse.failed') {
+        return res.status(400).json({ message: 'Request body is not valid JSON' });
+    }
+    console.error('Unhandled error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+});
 
 // Start the server
 const port = process.env.PORT || 3000;
