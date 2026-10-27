@@ -174,6 +174,17 @@ router.delete(
 
 // ---- Cover image (one per post, stored on Cloudinary)
 
+// Optional photo credit sent with an upload or on its own. Empty strings clear a field.
+const CREDIT_FIELDS = ['credit', 'creditUrl', 'license', 'licenseUrl'];
+const creditRules = [
+    body(['credit', 'license']).optional({ values: 'null' }).isString().trim()
+        .isLength({ max: 200 }).withMessage('Credits and licence names can be up to 200 characters'),
+    body(['creditUrl', 'licenseUrl']).optional({ values: 'falsy' }).isString().trim()
+        .isURL({ protocols: ['http', 'https'], require_protocol: true }).withMessage('Links must start with http:// or https://'),
+];
+const creditData = (b) =>
+    Object.fromEntries(CREDIT_FIELDS.filter((k) => b[k] !== undefined).map((k) => [k, b[k] ? String(b[k]).trim() : null]));
+
 router.post(
     '/posts/:id/cover',
     (req, res, next) => {
@@ -185,6 +196,8 @@ router.post(
         next();
     },
     upload.single('image'),
+    creditRules,
+    validate,
     handle(async (req, res) => {
         const existing = await findPost(req.params.id);
         if (!existing) return res.status(404).json({ message: 'Post not found' });
@@ -193,9 +206,23 @@ router.post(
         const uploaded = await images.uploadImage(req.file.buffer, { filename: req.file.originalname, mimetype: req.file.mimetype });
         await prisma.$transaction([
             prisma.file.deleteMany({ where: { postId: existing.id } }),
-            prisma.file.create({ data: { ...uploaded, post: { connect: { id: existing.id } } } }),
+            prisma.file.create({ data: { ...uploaded, ...creditData(req.body), post: { connect: { id: existing.id } } } }),
         ]);
         await images.deleteImages(existing.files.map((f) => f.publicId));
+        res.json(await findPost(existing.id));
+    }),
+);
+
+// Edit the photo credit without uploading the image again.
+router.patch(
+    '/posts/:id/cover',
+    creditRules,
+    validate,
+    handle(async (req, res) => {
+        const existing = await findPost(req.params.id);
+        if (!existing) return res.status(404).json({ message: 'Post not found' });
+        if (!existing.files.length) return res.status(400).json({ message: 'Add a cover image first' });
+        await prisma.file.updateMany({ where: { postId: existing.id }, data: creditData(req.body) });
         res.json(await findPost(existing.id));
     }),
 );

@@ -8,11 +8,29 @@ require('dotenv').config();
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
+const images = require('../lib/cloudinary');
 const prisma = new PrismaClient();
 
 const DAY = 24 * 60 * 60 * 1000;
 const daysAgo = (n) => new Date(Date.now() - n * DAY);
-const cover = (slug) => `https://picsum.photos/seed/${slug}/1200/800`;
+
+// Real photos for the sample posts. Each licence was checked on the photo's own page.
+// Flickr photos are CC BY 2.0 (credit required); Unsplash photos are free under the Unsplash License.
+const CC_BY_2 = { license: 'CC BY 2.0', licenseUrl: 'https://creativecommons.org/licenses/by/2.0/' };
+const UNSPLASH = { license: 'Unsplash License', licenseUrl: 'https://unsplash.com/license' };
+const unsplash = (photoId) => `https://images.unsplash.com/${photoId}?w=1600&q=80&auto=format&fit=crop`;
+const photos = {
+    post1: { source: unsplash('photo-1643116774075-acc00caa9a7b'), credit: 'James Wiseman on Unsplash', creditUrl: 'https://unsplash.com/photos/imgCpfIMoRw', ...UNSPLASH },
+    post2: { source: unsplash('photo-1762163516269-3c143e04175c'), credit: 'Domaintechnik on Unsplash', creditUrl: 'https://unsplash.com/photos/server-rack-with-blinking-green-lights-VHmBX7FnXw0', ...UNSPLASH },
+    post3: { source: unsplash('photo-1774901128215-3549cc686921'), credit: 'Bernd Dittrich on Unsplash', creditUrl: 'https://unsplash.com/photos/coding-on-a-dark-theme-computer-screen-9-U8xW54Le0', ...UNSPLASH },
+    post4: { source: unsplash('photo-1769731738826-a51acd5bddc7'), credit: 'Beatriz Cattel on Unsplash', creditUrl: 'https://unsplash.com/photos/hand-drawing-a-diagram-on-a-whiteboard-ajTN690FnUg', ...UNSPLASH },
+    post5: { source: unsplash('photo-1759272840538-ae4b07214c71'), credit: 'Haris Illahi on Unsplash', creditUrl: 'https://unsplash.com/photos/shipping-containers-stacked-at-a-busy-port-at-sunset-fT4SwA83jH4', ...UNSPLASH },
+    post6: { source: 'https://live.staticflickr.com/4018/4714472673_db7c83a573_b.jpg', credit: 'Adam Jones on Flickr', creditUrl: 'https://www.flickr.com/photos/adam_jones/4714472673', ...CC_BY_2 },
+    post7: { source: unsplash('photo-1572177147505-c44e97033921'), credit: 'Linus Mimietz on Unsplash', creditUrl: 'https://unsplash.com/photos/person-taking-a-picture-using-a-smartphone-XB_VsYA-H7A', ...UNSPLASH },
+    post8: { source: unsplash('photo-1772396867158-e26d9e6256b2'), credit: 'Gabriel Cox on Unsplash', creditUrl: 'https://unsplash.com/photos/an-open-notebook-with-a-pen-on-a-wooden-desk-6e7F96dBlAA', ...UNSPLASH },
+    post9: { source: 'https://live.staticflickr.com/4100/4756196534_283f9cef4b_b.jpg', credit: 'Adam Jones on Flickr', creditUrl: 'https://www.flickr.com/photos/adam_jones/4756196534', ...CC_BY_2 },
+    // draft1 has no cover: no Wli Falls photo with a licence that allows commercial use turned up.
+};
 const paragraphs = (...p) => p.join('\n\n');
 
 const categories = [
@@ -34,6 +52,7 @@ const tags = [
     { id: 'tag7', name: 'Ghana' },
     { id: 'tag8', name: 'Productivity' },
     { id: 'tag9', name: 'Cameras' },
+    { id: 'tag10', name: 'Markets' },
 ];
 
 const posts = [
@@ -129,6 +148,19 @@ const posts = [
         ),
     },
     {
+        id: 'post9',
+        title: 'Inside Kejetia, Kumasi’s great market',
+        category: 'cat4',
+        tags: ['tag7', 'tag10'],
+        date: daysAgo(6),
+        content: paragraphs(
+            'Kejetia Market sits in the heart of Kumasi, the capital of the Ashanti Region, and is often described as one of the largest open-air markets in West Africa. Thousands of traders sell almost everything here: fabric and beads, fresh produce and spices, cooking pots, phone accessories and car parts.',
+            'The market is easiest to enjoy early in the morning, before the heat builds and the lanes fill up. Wear comfortable shoes, keep your bag in front of you, and carry small notes, since many traders can’t change large ones.',
+            'Kejetia is a working market rather than a tourist attraction, so be patient and polite. Ask before photographing people or their stalls, and expect to bargain gently for anything without a price.',
+            'If you lose your bearings, ask for the Kejetia lorry station beside the market and anyone can point you back towards it. The Manhyia Palace Museum and the Centre for National Culture are both nearby and make a good way to round off the day.'
+        ),
+    },
+    {
         id: 'post8',
         title: 'Building a writing routine that sticks',
         category: 'cat6',
@@ -188,6 +220,7 @@ async function main() {
         await prisma.tag.upsert({ where: { id: t.id }, update: { name: t.name }, create: t });
     }
 
+    let uploaded = 0;
     for (const p of posts) {
         const data = {
             title: p.title,
@@ -211,20 +244,27 @@ async function main() {
 
         // One cover image per post, replaced on each run.
         await prisma.file.deleteMany({ where: { postId: p.id } });
+        const photo = photos[p.id];
+        if (!photo) continue;
+        const { source, ...credit } = photo;
+        let stored = { url: source, publicId: null, storedName: `${p.id}-cover.jpg`, type: 'image/jpeg' };
+        if (images.isConfigured()) {
+            try {
+                // Copy into Cloudinary, like an admin upload. A fixed ID means re-running overwrites it.
+                stored = await images.uploadFromUrl(source, { publicId: `seed-${p.id}` });
+            } catch (error) {
+                console.warn(`Couldn't copy the ${p.id} photo to Cloudinary (${error.message || error}); linking to the original instead.`);
+            }
+        }
         await prisma.file.create({
-            data: {
-                name: `${p.id}-cover.jpg`,
-                storedName: `${p.id}-cover.jpg`,
-                url: cover(p.id),
-                publicId: null, // sample images aren't on Cloudinary, so there's nothing to delete there
-                type: 'image/jpeg',
-                post: { connect: { id: p.id } },
-            },
+            data: { name: `${p.id}-cover.jpg`, ...stored, ...credit, post: { connect: { id: p.id } } },
         });
+        uploaded += stored.publicId ? 1 : 0;
     }
 
     const published = posts.filter((p) => p.published !== false).length;
     console.log(`Seeded ${categories.length} categories, ${tags.length} tags, ${published} published posts and ${posts.length - published} draft.`);
+    console.log(uploaded ? `Copied ${uploaded} cover photos to Cloudinary.` : 'Cover photos link to their original source (set CLOUDINARY_URL to copy them to Cloudinary).');
 }
 
 main()

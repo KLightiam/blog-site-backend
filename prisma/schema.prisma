@@ -63,6 +63,11 @@ model File {
   publicId String?
   size Decimal?
   type String?
+  // Photo credit, shown under the cover on the article page
+  credit String?
+  creditUrl String?
+  license String?
+  licenseUrl String?
   date DateTime @default(now())
   post Post @relation(fields: [postId], references: [id])
   postId String

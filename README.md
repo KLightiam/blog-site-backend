@@ -9,7 +9,7 @@ Built with Node.js, Express, Prisma, PostgreSQL and Cloudinary.
 ```sh
 npm install
 cp .env.example .env          # then fill in DATABASE_URL and the two token secrets
-npx prisma migrate deploy     # create the tables
+npx prisma migrate deploy     # create the tables (run again after pulling new migrations)
 npm run seed                  # optional: sample categories, posts and an admin account
 npm run dev                   # http://localhost:3000
 ```
@@ -22,7 +22,7 @@ Cover images uploaded in the admin are stored on [Cloudinary](https://cloudinary
 
 Without `CLOUDINARY_URL` the API still runs; uploads answer 503 with a message saying the keys are missing.
 
-`npm run seed` can be run more than once; it updates the sample records instead of duplicating them. It creates one admin account. Set `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` in `.env` to choose its login; otherwise a random password is printed when the account is first created.
+`npm run seed` can be run more than once; it updates the sample records instead of duplicating them (and resets any edits made to the sample posts). The sample posts use real photos: two Adam Jones photos from Flickr (Kejetia Market and Cape Coast Castle, CC BY 2.0) and seven from Unsplash, each credited under the cover. With `CLOUDINARY_URL` set, the seed copies them into Cloudinary; otherwise it links to the originals. It creates one admin account. Set `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` in `.env` to choose its login; otherwise a random password is printed when the account is first created.
 
 ## Public routes (used by the reading site)
 
@@ -56,7 +56,8 @@ Every route below needs `Authorization: Bearer <accessToken>` from an `ADMIN` ac
 | `POST /api/v1/admin/posts` | Create: `{ title, content?, published?, categoryId?, tags?: string[] }`. Starts as a draft unless `published` is true. |
 | `PUT /api/v1/admin/posts/:id` | Change any of the same fields. `categoryId: null` and `tags: []` clear them. |
 | `DELETE /api/v1/admin/posts/:id` | Delete the post and its cover image |
-| `POST /api/v1/admin/posts/:id/cover` | Upload the cover: multipart form, file in the `image` field (JPEG, PNG, WebP, GIF or AVIF, up to 5 MB). Replaces any existing cover. |
+| `POST /api/v1/admin/posts/:id/cover` | Upload the cover: multipart form, file in the `image` field (JPEG, PNG, WebP, GIF or AVIF, up to 5 MB), plus optional `credit`, `creditUrl`, `license`, `licenseUrl`. Replaces any existing cover. |
+| `PATCH /api/v1/admin/posts/:id/cover` | Change the photo credit: `{ credit, creditUrl, license, licenseUrl }`. An empty string clears a field; links must be `http(s)`. |
 | `DELETE /api/v1/admin/posts/:id/cover` | Remove the cover |
 | `GET /api/v1/admin/categories` | All categories, with `postCount` and `publishedCount` |
 | `POST /api/v1/admin/categories` · `PUT /…/:id` · `DELETE /…/:id` | Add `{ name }`, rename, delete. Deleting keeps the posts, without a category. |
